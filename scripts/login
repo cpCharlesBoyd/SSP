@@ -20,18 +20,23 @@ use File::Find;
 use IO::Socket::INET;
 
 $| = 1;
-my $version = '3.17';
+my $version = '3.22';
 $Term::ANSIColor::AUTORESET = 1;
+
+######################
+##  BEGIN GLOBALS   ##
+######################
 
 my $os                  = Cpanel::OSSys::getos();
 my @local_ipaddrs_list  = Cpanel::Ips::Fetch::fetch_ips_array();
 chomp( my %hostinfo     = get_hostinfo() );
 my @process_list        = get_process_list();
-my $apache_bin          = '/usr/local/apache/bin/httpd';
-my @custom_opt_mods;
-my @usr_local_cpanel_hooks;
-my @easyapache_templates;
-my @rpm_list;
+my @custom_opt_mods;            # items in /var/cpanel/easy/apache/custom_opt_mods/
+my @usr_local_cpanel_hooks;     # items in /usr/local/cpanel/hooks/
+my @easyapache_templates;       # items in /var/cpanel/easy/apache/profile/
+my @rpm_list;                   # rpm -qa
+my @apache_version_output;      # apache -v
+my @apache_modules_output;      # apache -M
 
 my %cpuinfo;
 if ( $os eq 'freebsd' ) {
@@ -40,6 +45,19 @@ if ( $os eq 'freebsd' ) {
 else {
     chomp( %cpuinfo = get_cpuinfo() );
 }
+
+my $apache_bin = '/usr/local/apache/bin/httpd';
+if ( -x $apache_bin ) {
+    my $apache_version_output = Cpanel::SafeRun::Errors::saferunnoerror( $apache_bin, '-v' );
+    @apache_version_output = split /\n/, $apache_version_output;
+
+    my $apache_modules_output = Cpanel::SafeRun::Errors::saferunnoerror( $apache_bin, '-M' );
+    @apache_modules_output = split /\n/, $apache_modules_output;
+}
+
+######################
+##  END GLOBALS     ##
+######################
 
 print "\n";
 
@@ -61,6 +79,7 @@ print_php_configuration();
 check_sysinfo();
 check_for_remote_mysql();
 print_if_using_mydns_or_nsd();
+print_if_using_modruid2();
 
 ## [WARN]
 check_selinux_status();
@@ -118,6 +137,9 @@ check_pecl_phpini_location();
 check_for_empty_yumconf();
 check_for_cpanel_files();
 check_bash_history_for_certain_commands();
+check_wwwacctconf_for_incorrect_minuid();
+check_roots_cron_for_certain_commands();
+check_for_missing_or_commented_customlog();
 
 # [3RDP]
 check_for_assp();
@@ -380,6 +402,7 @@ sub print_cpanel_version {
                 chomp( $cpanel_tier = $1 );
             }
         }
+        close $cpupdate_fh;
     }
     else {
         $cpanel_tier = 'Unknown (could not open/read /etc/cpupdate.conf ?)';
@@ -495,12 +518,11 @@ sub check_for_clustering {
 
 sub print_apache_version {
 
-    my ( $apache_version, $apache_built, $apache_ea_version );
+    if ( @apache_version_output ) {
 
-    if ( -x $apache_bin ) {
-        my $apache_bin_output = Cpanel::SafeRun::Errors::saferunnoerror( $apache_bin, '-v' );
-        my @apache_bin_output = split /\n/, $apache_bin_output;
-        for my $line ( @apache_bin_output ) {
+        my ( $apache_version, $apache_built, $apache_ea_version );
+
+        for my $line ( @apache_version_output ) {
             if ( $line =~ m{ \A Server \s version: \s (.*) \z }xms ) {
                 $apache_version = $1;
             }
@@ -522,12 +544,8 @@ sub print_apache_version {
             print_info( 'Apache Built: ' );
             print_normal( "$apache_built w/ $apache_ea_version" );
         }
-    }    
-    else {
-        print_info( 'Apache Info: ' );
-        print_warning( "$apache_bin not executable?" );
-    }    
-}
+    }
+}    
 
 sub print_apache_uptime {
     my ( $apache_uptime, $apache_generations );
@@ -743,6 +761,16 @@ sub print_if_using_mydns_or_nsd {
     elsif ( -e '/var/cpanel/usemydns' ) {
         print_info( 'DNS Service: ' );
         print_normal( 'MyDNS ' );
+    }
+}
+
+sub print_if_using_modruid2 {
+    for ( @apache_modules_output ) {
+        if ( /ruid2_module/ ) {
+            print_info( 'mod_ruid2: ' );
+            print_normal( 'is enabled' );
+            last;
+        }
     }
 }
 
@@ -1028,7 +1056,11 @@ sub check_for_custom_opt_mods {
     my $dir = '/var/cpanel/easy/apache/custom_opt_mods';
     find( \&find_custom_opt_mods, $dir );
 
-    if ( @custom_opt_mods ) {
+    if ( scalar @custom_opt_mods > 10 ) {
+        print_warn( "$dir: " );
+        print_warning( 'many custom opt mods exist, check manually' );
+    }
+    elsif ( @custom_opt_mods ) {
         for my $custom_opt_mod ( @custom_opt_mods ) {
             $custom_opt_mods .= "$custom_opt_mod ";
         }
@@ -1189,27 +1221,29 @@ sub check_perl_sanity {
 
 sub check_for_non_default_permissions {
     my %resources_and_perms = (
-        '/'                     => '755',
-        '/bin'                  => '755',
-        '/bin/bash'             => '755',
-        '/bin/ln'               => '755',
-        '/sbin'                 => '755',
-        '/usr/bin'              => '755',
-        '/usr/sbin'             => '755',
-        '/usr/local/bin'        => '755',
-        '/usr/local/sbin'       => '755',
-        '/opt'                  => '755',
-        '/tmp'                  => '1777',
-        '/usr'                  => '755',
-        '/var'                  => '755',
-        '/root/cpanel3-skel'    => '755',
-        '/usr/local/apache'     => '755',
-        '/var/cpanel/locale'    => '755',
-        '/etc/passwd'           => '644',
-        '/etc/group'            => '644',
-        '/etc/hosts'            => '644',
-        '/etc/stats.conf'       => '644',
-        '/etc/nsswitch.conf'    => '644',
+        '/'                             => '755',
+        '/bin'                          => '755',
+        '/bin/bash'                     => '755',
+        '/bin/ln'                       => '755',
+        '/etc/group'                    => '644',
+        '/etc/hosts'                    => '644',
+        '/etc/nsswitch.conf'            => '644',
+        '/etc/passwd'                   => '644',
+        '/etc/stats.conf'               => '644',
+        '/opt'                          => '755',
+        '/root/cpanel3-skel'            => '755',
+        '/sbin'                         => '755',
+        '/tmp'                          => '1777',
+        '/usr'                          => '755',
+        '/usr/bin'                      => '755',
+        '/usr/bin/passwd'               => '4755',
+        '/usr/sbin'                     => '755',
+        '/usr/local/apache'             => '755',
+        '/usr/local/apache/bin/httpd'   => '755',
+        '/usr/local/bin'                => '755',
+        '/usr/local/sbin'               => '755',
+        '/var'                          => '755',
+        '/var/cpanel/locale'            => '755',
     );
 
     for my $resource ( keys %resources_and_perms ) {
@@ -1218,7 +1252,7 @@ sub check_for_non_default_permissions {
             $mode = sprintf "%lo", $mode;
             if ( $mode != $resources_and_perms{$resource} ) {
                 next if ( $resource =~ '^(/(s?)bin|/usr/bin|/)$' and $mode == '555' ); # CentOS 6.2
-                next if ( $resource =~ '^/(var|sbin|usr/local/sbin|usr)?$' and $mode == '711' );
+                next if ( $resource =~ '^/(var|sbin|usr/local/sbin|usr|usr/sbin)?$' and $mode == '711' );
                 print_warn( 'Non-default Permissions: ' );
                 print_warning( "$resource (mode: $mode | default: $resources_and_perms{$resource})" );
             }
@@ -1232,6 +1266,15 @@ sub check_for_non_default_permissions {
         if ( $mode != '600' and $mode != '400' and $mode != '200' ) {
             print_warn( 'Non-default Permissions: ' );
             print_warning( "/etc/shadow (mode: $mode | default: 0400 or 0600)" );
+        }
+    }
+
+    if ( -e '/usr/bin/crontab' ) {
+        my $mode = ( stat( '/usr/bin/crontab' ))[2] & 07777;
+        $mode = sprintf "%lo", $mode;
+        if ( $mode != '4755' and $mode != '6755' ) {
+            print_warn( 'Non-default Permissions: ' );
+            print_warning( "/usr/bin/crontab (mode: $mode | default: 4755 or 6755)" );
         }
     }
 
@@ -1265,6 +1308,7 @@ sub check_awstats_permissions {
                 $skipawstats = $1;
             }
         }
+        close $cpanel_config_fh;
     }
 
     if ( $skipawstats == 0 ) {
@@ -1561,7 +1605,7 @@ sub check_for_etc_hosts_no_loopback {
                     $localhost = 1;
                 }
             }
-        close $hosts_fh;
+            close $hosts_fh;
         }
     }
 
@@ -1645,6 +1689,7 @@ sub check_for_sql_safe_mode {
                     print_warning( 'sql.safe_mode is enabled!' );
                 }
             }
+            close $file_fh;
         }
     }
 }
@@ -1663,6 +1708,7 @@ sub check_mysql_non_default_datadir {
                 last;
             }
         }
+        close $my_cnf_fh;
     }
 }
 
@@ -1708,7 +1754,7 @@ sub check_for_empty_postgres_config {
     my $postgres_config = '/var/lib/pgsql/data/pg_hba.conf';
     if ( -f $postgres_config and -z $postgres_config ) {
         print_warn( 'Postgres config: ' );
-        print_warning( "$postgres_config is empty" );
+        print_warning( "$postgres_config is empty (install via WHM >> Postgres Config)" );
     }
 }
 
@@ -1751,6 +1797,7 @@ sub check_for_missing_timezone_from_phpini {
                 last;
             }
         }
+        close $phpini_fh;
     }
 
     if ( $timezone ) {
@@ -1776,6 +1823,7 @@ sub check_for_proc_mdstat_recovery {
                 last;
             }
         }
+        close $mdstat_fh;
     }
 
     if ( $recovery == 1 ) {
@@ -2051,9 +2099,6 @@ sub check_bash_history_for_certain_commands {
     my %shell_commands = (
         'chattr'        => 0,
         'chmod'         => 0,
-	'chown'         => 0,
-	'userdel'	=> 0,
-	'groupdel'	=> 0,
     );
 
     my $commands;
@@ -2072,14 +2117,6 @@ sub check_bash_history_for_certain_commands {
                 elsif ( /chmod/ ) {
                     $shell_commands{'chmod'} = 1;
                 }
-		elsif ( /chown/ ) {
-		    $shell_commands{'chown'} =1;
-		elsif ( /userdel/ ) {
-		    $shell_commands{'userdel'} = 1;
-		}
-		elsif ( /groupdel/ ) {
-		    $shell_commands{'groupdel'} = 1;
-		}
             }
             close $history_fh;
         }
@@ -2093,7 +2130,149 @@ sub check_bash_history_for_certain_commands {
 
     if ( $commands ) {
         print_warn( "$bash_history commands found: " );
-        print_warning( "$commands" );
+        print_warning( $commands );
+    }
+}
+
+sub check_wwwacctconf_for_incorrect_minuid {
+    my $wwwacctconf = '/etc/wwwacct.conf';
+    my $minuid;
+
+    if ( open my $wwwacctconf_fh, '<', $wwwacctconf ) {
+        while ( <$wwwacctconf_fh> ) {
+            if ( /^MINUID\s(\d+)$/ ) {
+                $minuid = $1;
+            }
+        }
+        close $wwwacctconf_fh;
+    }
+
+    if ( $minuid and $minuid =~ /\d+/ ) {
+        if ( $minuid < 500 or $minuid > 60000 ) {
+            print_warn( 'MINUID: ' );
+            print_warning( "$wwwacctconf has a MINUID value of $minuid (should be between 500 and 60000)" );
+        }
+    }
+}
+
+sub check_roots_cron_for_certain_commands {
+    return if ( $os eq 'freebsd' );
+
+    my $cron = '/var/spool/cron/root';
+
+    return if ! -e $cron;
+
+    my %commands = (
+        'rm'    => 0,
+    );
+
+    my $commands;
+
+    if ( open my $cron_fh, '<', $cron ) {
+        while ( <$cron_fh> ) {
+            if ( /\srm\s/ ) {
+                $commands{'rm'} = 1;
+            }
+            elsif ( /\schmod\s/ ) {
+                $commands{'chmod'} = 1;
+            }
+            elsif ( /\schown\s/ ) {
+                $commands{'chown'} = 1;
+            }
+        }
+        close $cron_fh;
+    }
+
+    while ( my ( $key, $value ) = each ( %commands ) ) {
+        if ( $value == 1 ) {
+            $commands .= "[$key] ";
+        }
+    }
+
+    if ( $commands ) {
+        print_warn( "$cron commands found: " );
+        print_warning( $commands );
+    }
+}
+
+sub check_for_missing_or_commented_customlog {
+    my $apache_version;
+    my $templates_dir = '/var/cpanel/templates/apache';
+    my $commented_templates;
+    my $missing_customlog_templates;
+    my $httpdconf = '/usr/local/apache/conf/httpd.conf';
+    my $httpdconf_commented_customlog;
+    my $httpdconf_customlog_exists;
+
+    if ( @apache_version_output ) {
+        for my $line ( @apache_version_output ) {
+            if ( $line =~ m{ \A Server \s version: \s Apache\/(\d) (?:.*) \z }xms ) {
+                $apache_version = $1;
+            }
+        }
+    }
+
+    $apache_version == 1 ? $templates_dir .= 1 : $templates_dir .= 2;
+
+    my %templates = (
+        'main.default'      => 0,
+        'main.local'        => 0,
+        'vhost.default'     => 0,
+        'vhost.local'       => 0,
+        'ssl_vhost.default' => 0,
+        'ssl_vhost.local'   => 0,
+    );
+
+    for my $template ( keys %templates ) {
+        my $template_full_path = $templates_dir . '/' . $template;
+        if ( -f $template_full_path ) {
+            if ( open my $template_fh, '<', $template_full_path ) {
+                while ( <$template_fh> ) {
+                    if ( /#(?:\s+)?CustomLog\s/i ) {
+                        $commented_templates .= "$template_full_path ";
+                    }
+                    elsif ( /CustomLog\s/i ) {
+                        $templates{$template} = 1;
+                    }
+                }
+                close $template_fh;
+            }
+        }
+    }
+
+    while ( my ( $template, $value ) = each ( %templates ) ) {
+        if ( $value == 0 and -f "$templates_dir/$template" ) {
+            $missing_customlog_templates .= "$templates_dir/$template ";
+        }
+    }
+
+    if ( open my $httpdconf_fh, '<', $httpdconf ) {
+        while ( <$httpdconf_fh> ) {
+            if ( /#(?:\s+)?CustomLog\s/i ) {
+                $httpdconf_commented_customlog = 1;
+            }
+            elsif ( /CustomLog\s/i ) {
+                $httpdconf_customlog_exists = 1;
+            }
+        }
+        close $httpdconf_fh;
+    }
+
+    if ( $httpdconf_commented_customlog ) {
+        $commented_templates .= ' httpd.conf';
+    }
+    elsif ( !$httpdconf_customlog_exists ) {
+        $missing_customlog_templates .= ' httpd.conf';
+    }
+
+    if ( $commented_templates ) {
+        print_warn( 'CustomLog commented out: ' );
+        print_warning( $commented_templates );
+    }
+
+    if ( $missing_customlog_templates ) {
+        print_warn( 'CustomLog entries missing: ' );
+        print_warning( $missing_customlog_templates );
     }
 }
 
@@ -2186,7 +2365,7 @@ sub check_for_mailscanner {
     my $mailscanner = 0;
 
     for my $line ( @process_list ) {
-        if ( $line =~ /MailScanner/ ) {
+        if ( $line =~ m{ \A mailnull (?:.*) MailScanner }xms ) {
             $mailscanner = 1;
             last;
         }
@@ -2254,10 +2433,8 @@ sub check_for_1h {
 
     if ( -d '/usr/local/1h' ) {
         $one_h = 1;
-        if ( -x $apache_bin ) {
-            my $apache_modules = Cpanel::SafeRun::Errors::saferunnoerror( $apache_bin, '-M' );
-            my @apache_modules = split /\n/, $apache_modules;
-            for my $line ( @apache_modules ) {
+        if ( @apache_modules_output ) {
+            for my $line ( @apache_modules_output ) {
                 if ( $line =~ /hive/ ) {
                     $hive_module = 'loaded';
                 }

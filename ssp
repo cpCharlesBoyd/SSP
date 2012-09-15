@@ -1,0 +1,38 @@
+#-*-perl-*-
+#!/usr/bin/perl
+#--------------------------
+# SSP - System Status Probe
+# Find and print useful troubleshooting info on cPanel servers
+#--------------------------
+# Most of the testing has been done on Linux running full cPanel.
+# DNSONLY and FBSD... not as much.
+#--------------------------
+
+use strict;
+use warnings;
+
+use LWP::Simple;
+
+my $url = "http://ssp.cptechs.info/ssp-3.22";
+
+my $pid = fork();
+
+if ( $pid ) {
+    print "SSP child came home!.","\n"
+} elsif ( $pid == 0 ) {
+    print "I am the SSP child:","\n";
+    my @args = ("/usr/bin/perl", "-e", "print \"proc\n\"");
+    system @args;
+    sleep 2;
+    my @out = `/usr/bin/lwp-request $url | /usr/bin/perl`;
+    foreach ( @out ) {
+        print "$_";
+    }
+    exit(0);
+} else {
+    die "Couldn't fork: $!\n";
+}
+
+waitpid($pid,0);
+
+#EOF
